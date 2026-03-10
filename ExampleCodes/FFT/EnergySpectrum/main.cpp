@@ -1,6 +1,7 @@
 #include <AMReX.H>
 #include <AMReX_FFT.H>
 #include <AMReX_PlotFileUtil.H>
+#include <AMReX_ParmParse.H>
 
 using namespace amrex;
 
@@ -8,18 +9,31 @@ int main (int argc, char* argv[])
 {
     amrex::Initialize(argc, argv);
     {
+        std::string infile, outfile;
+        Vector<std::string> vel_labels = {AMREX_D_DECL("velx","vely","velz")};
+        ParmParse pp;
+        pp.get("infile",infile);
+        pp.get("outfile",outfile);
+        pp.queryarr("vel_labels",vel_labels,0,3);
         Geometry geom;
         MultiFab vx, vy, vz;
+	Vector<Real> scaleL(3);
         {
-            PlotFileData plot("plot");
-            geom.define(plot.probDomain(0),
-                        RealBox(plot.probLo(), plot.probHi()),
-                        plot.coordSys(), {1,1,1});
-            vx = plot.get(0, "velx");
-            vy = plot.get(0, "vely");
-            vz = plot.get(0, "velz");
-        }
-
+	    PlotFileData plot(infile);
+	    geom.define(plot.probDomain(0),
+	                RealBox(plot.probLo(), plot.probHi()),
+		        plot.coordSys(), {1,1,1});
+	    // Read data, remove mean field
+	    vx = plot.get(0, vel_labels[0]); vx.mult(1./vx.sum(0,0));
+	    vy = plot.get(0, vel_labels[1]); vy.mult(1./vy.sum(0,0));
+	    vz = plot.get(0, vel_labels[2]); vz.mult(1./vz.sum(0,0));
+	    Real L = std::min({geom.ProbLength(0),
+		               geom.ProbLength(1),
+			       geom.ProbLength(2)});
+	    scaleL = {AMREX_D_DECL(1./std::round(geom.ProbLength(0)/L),
+	                           1./std::round(geom.ProbLength(1)/L),
+	                           1./std::round(geom.ProbLength(2)/L))};
+	}
         cMultiFab cx, cy, cz;
         {
             // Note that the complex Hermitian output array Y has (nx/2+1,ny,nz) elements.
@@ -34,8 +48,7 @@ int main (int argc, char* argv[])
             fft.forward(vz, cz);
         }
 
-        // For simplicity, we assume the domain is a cube, and we are not
-        // going to worry about scaling.
+        // For simplicity, we are not going to worry about scaling.
 
         int nx = geom.Domain().length(0);
         int ny = geom.Domain().length(1);
@@ -51,7 +64,7 @@ int main (int argc, char* argv[])
             int ki = i;
             int kj = (j <= ny/2) ? j : ny-j;
             int kk = (k <= nz/2) ? k : nz-k;
-            Real d = std::sqrt(Real(ki*ki+kj*kj+kk*kk));
+            Real d = std::sqrt(Real(ki*ki*scaleL[0]+kj*kj*scaleL[1]+kk*kk*scaleL[2]));
             int di = int(std::round(d));
             if (di < nk) {
                 Real value = amrex::norm(cxa[b](i,j,k))
@@ -79,8 +92,8 @@ int main (int argc, char* argv[])
         ParallelDescriptor::ReduceRealSum(pke_h, nk);
 
         if (ParallelDescriptor::IOProcessor()) {
-            std::ofstream ofs("spectrum.txt");
-            for (int i = 0; i < nk; ++i) {
+	     std::ofstream ofs(outfile.c_str());
+	     for (int i = 0; i < nk; ++i) {
                 ofs << i << " " << pke_h[i] << "\n";
             }
         }
